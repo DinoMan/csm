@@ -4,11 +4,11 @@ from typing import List, Tuple
 import torch
 import torchaudio
 from huggingface_hub import hf_hub_download
-from models import Model
+from csm.models import Model
 from moshi.models import loaders
 from tokenizers.processors import TemplateProcessing
 from transformers import AutoTokenizer
-from watermarking import CSM_1B_GH_WATERMARK, load_watermarker, watermark
+from csm.watermarking import CSM_1B_GH_WATERMARK, load_watermarker, watermark
 
 
 @dataclass
@@ -19,12 +19,16 @@ class Segment:
     audio: torch.Tensor
 
 
-def load_llama3_tokenizer():
+def load_llama3_tokenizer(tokenizer_path: str = "meta-llama/Llama-3.2-1B"):
     """
     https://github.com/huggingface/transformers/issues/22794#issuecomment-2092623992
     """
-    tokenizer_name = "meta-llama/Llama-3.2-1B"
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
+    import os
+    if os.path.isdir(tokenizer_path):
+        from transformers import PreTrainedTokenizerFast
+        tokenizer = PreTrainedTokenizerFast.from_pretrained(tokenizer_path)
+    else:
+        tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
     bos = tokenizer.bos_token
     eos = tokenizer.eos_token
     tokenizer._tokenizer.post_processor = TemplateProcessing(
@@ -40,19 +44,31 @@ class Generator:
     def __init__(
         self,
         model: Model,
+        watermark: bool = True,
+        checkpoint_dir: str | None = None,
     ):
         self._model = model
         self._model.setup_caches(1)
 
-        self._text_tokenizer = load_llama3_tokenizer()
+        tokenizer_path = checkpoint_dir if checkpoint_dir else "meta-llama/Llama-3.2-1B"
+        self._text_tokenizer = load_llama3_tokenizer(tokenizer_path)
 
         device = next(model.parameters()).device
-        mimi_weight = hf_hub_download(loaders.DEFAULT_REPO, loaders.MIMI_NAME)
+        if checkpoint_dir:
+            import os
+            local_mimi = os.path.join(checkpoint_dir, "mimi_weight.pth")
+            if os.path.exists(local_mimi):
+                mimi_weight = local_mimi
+            else:
+                mimi_weight = hf_hub_download(loaders.DEFAULT_REPO, loaders.MIMI_NAME)
+        else:
+            mimi_weight = hf_hub_download(loaders.DEFAULT_REPO, loaders.MIMI_NAME)
         mimi = loaders.get_mimi(mimi_weight, device=device)
         mimi.set_num_codebooks(32)
         self._audio_tokenizer = mimi
 
-        self._watermarker = load_watermarker(device=device)
+        self._watermark = watermark
+        self._watermarker = load_watermarker(device=device) if watermark else None
 
         self.sample_rate = mimi.sample_rate
         self.device = device
@@ -158,19 +174,20 @@ class Generator:
 
         audio = self._audio_tokenizer.decode(torch.stack(samples).permute(1, 2, 0)).squeeze(0).squeeze(0)
 
-        # This applies an imperceptible watermark to identify audio as AI-generated.
-        # Watermarking ensures transparency, dissuades misuse, and enables traceability.
-        # Please be a responsible AI citizen and keep the watermarking in place.
-        # If using CSM 1B in another application, use your own private key and keep it secret.
-        audio, wm_sample_rate = watermark(self._watermarker, audio, self.sample_rate, CSM_1B_GH_WATERMARK)
-        audio = torchaudio.functional.resample(audio, orig_freq=wm_sample_rate, new_freq=self.sample_rate)
+        if self._watermark:
+            # This applies an imperceptible watermark to identify audio as AI-generated.
+            audio, wm_sample_rate = watermark(self._watermarker, audio, self.sample_rate, CSM_1B_GH_WATERMARK)
+            audio = torchaudio.functional.resample(audio, orig_freq=wm_sample_rate, new_freq=self.sample_rate)
 
         return audio
 
 
-def load_csm_1b(device: str = "cuda") -> Generator:
-    model = Model.from_pretrained("sesame/csm-1b")
+def load_csm_1b(device: str = "cuda", watermark: bool = True, checkpoint_dir: str | None = None) -> Generator:
+    if checkpoint_dir:
+        model = Model.from_pretrained(checkpoint_dir, local_files_only=True)
+    else:
+        model = Model.from_pretrained("sesame/csm-1b")
     model.to(device=device, dtype=torch.bfloat16)
 
-    generator = Generator(model)
+    generator = Generator(model, watermark=watermark, checkpoint_dir=checkpoint_dir)
     return generator

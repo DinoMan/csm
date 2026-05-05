@@ -1,4 +1,4 @@
-from setuptools import setup
+from setuptools import setup, find_packages
 
 with open('requirements.txt') as f:
     requirements = [line.strip() for line in f if line.strip() and not line.startswith('#')]
@@ -6,6 +6,6 @@ with open('requirements.txt') as f:
 setup(
     name='csm',
     version='0.1.0',
-    py_modules=['generator', 'models', 'watermarking'],
+    packages=find_packages(),
     install_requires=requirements,
 )
